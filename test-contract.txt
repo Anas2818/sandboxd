@@ -1,0 +1,184 @@
+.venv/bin/schemathesis run openapi.yaml --url http://localhost:8000 -n 20 -w 1 \
+	--exclude-checks positive_data_acceptance
+Schemathesis v4.34.2
+━━━━━━━━━━━━━━━━━━━━
+
+ ✅  Loaded specification from openapi.yaml (in 12.26s)
+
+     Base URL:         http://localhost:8000
+     Specification:    Open API 3.1.0
+     Operations:       9 selected / 9 total
+
+ ✅  API capabilities:
+
+     Supports NULL byte in headers:                            ✘
+     Accepts backslash and control characters in URL paths:    ✓
+
+ ❌  Examples (in 2.48s)
+
+     ✅ 6 passed  ❌ 1 failed  ⏭  2 skipped
+
+ ❌  Coverage (in 7.09s)
+
+     ✅ 3 passed  ❌ 6 failed
+
+ ❌  Fuzzing (in 14.49s)
+
+     ✅ 6 passed  ❌ 3 failed
+
+ ❌  Stateful (in 12.96s)
+
+     Scenarios:    48
+     API Links:    13 covered / 22 selected / 22 total (22 inferred)
+
+     ✅ 44 passed  ❌ 4 failed
+
+=================================== FAILURES ===================================
+_____________________ GET /v1/sandboxes/{sandbox_id}/files _____________________
+1. Test Case ID: qPL2KS
+
+- ST103 Undocumented status code
+
+    Received: 422
+    Documented: 200, 400, 404, 409
+
+[422] Unprocessable Content:
+
+    `{"type":"/errors/validation","title":"Unprocessable Content","status":422,"instance":"/v1/sandboxes/sbx-a1b2c3d4/files","detail":"query.path : Field required"}`
+
+Reproduce with:
+
+    curl -X GET http://localhost:8000/v1/sandboxes/sbx-a1b2c3d4/files
+
+    st replay qPL2KS
+
+______________________ OPTIONS /v1/sandboxes/{sandbox_id} ______________________
+1. Test Case ID: hzWxch
+
+- ST205 Allow header mismatch
+
+    `Allow: DELETE, GET` does not match the schema. Missing documented methods: PATCH
+
+    List exactly the methods this resource supports in `Allow`
+
+[405] Method Not Allowed:
+
+    `{"type":"/errors/method-not-allowed","title":"Method Not Allowed","status":405,"instance":"/v1/sandboxes/sbx-2346df9a","detail":"Method Not Allowed"}`
+
+Reproduce with:
+
+    curl -X OPTIONS http://localhost:8000/v1/sandboxes/sbx-2346df9a
+
+    st replay hzWxch
+
+_______________________ PATCH /v1/sandboxes/{sandbox_id} _______________________
+1. Test Case ID: OWWPIX
+
+- ST103 Undocumented status code
+
+    Received: 405
+    Documented: 200, 400, 404, 409, 415, 422
+
+[405] Method Not Allowed:
+
+    `{"type":"/errors/method-not-allowed","title":"Method Not Allowed","status":405,"instance":"/v1/sandboxes/sbx-2346df9a","detail":"Method Not Allowed"}`
+
+Reproduce with:
+
+    curl -X PATCH -H 'Content-Type: application/merge-patch+json' -d '{"ttl_seconds": 1800}' http://localhost:8000/v1/sandboxes/sbx-2346df9a
+
+    st replay OWWPIX
+
+______________________________ POST /v1/sandboxes ______________________________
+1. Test Case ID: sKjnSs
+
+- ST201 Schema-violating request accepted
+
+    Invalid data should have been rejected
+    Expected: 400, 401, 403, 404, 405, 406, 409, 415, 422, 428, 429, 5xx
+    Invalid component: parameter `Idempotency-Key` in header - string larger than maxLength
+
+[202] Accepted:
+
+    `{"id":"sbx-409f4ca3","image":"python:3.12-slim","status":"pending","ttl_seconds":600,"limits":{"cpus":1,"memory_mb":512},"created_at":"2026-11-24T18:50:49Z","expires_at":"2026-11-24T19:00:49Z"}`
+
+Reproduce with:
+
+    curl -X POST -H 'Idempotency-Key: [Filtered]' -H 'Content-Type: application/json' -d '{"image": "python:3.12-slim"}' http://localhost:8000/v1/sandboxes
+
+    st replay sKjnSs
+
+_____________________ POST /v1/sandboxes/{sandbox_id}/exec _____________________
+1. Test Case ID: KH5bUy
+
+- ST201 Schema-violating request accepted
+
+    Invalid data should have been rejected
+    Expected: 400, 401, 403, 404, 405, 406, 409, 415, 422, 428, 429, 5xx
+    Invalid component: in body - cmd -> Array with invalid items: String smaller than minLength
+
+[200] OK:
+
+    `{"exit_code":127,"stdout":"","stderr":"timeout: failed to run command ‘’: No such file or directory\n","duration_ms":99,"timed_out":false,"truncated":false}`
+
+Reproduce with:
+
+    curl -X POST -H 'Content-Type: application/json' -d '{"cmd": [""], "timeout_seconds": 30}' http://localhost:8000/v1/sandboxes/sbx-d94a34b6/exec
+
+    st replay KH5bUy
+
+_____________________ PUT /v1/sandboxes/{sandbox_id}/files _____________________
+1. Test Case ID: l5RE3u
+
+- ST103 Undocumented status code
+
+    Received: 422
+    Documented: 201, 204, 400, 404, 409, 413, 415
+
+[422] Unprocessable Content:
+
+    `{"type":"/errors/validation","title":"Unprocessable Content","status":422,"instance":"/v1/sandboxes/sbx-409f4ca3/files","detail":"query.path : Field required"}`
+
+Reproduce with:
+
+    curl -X PUT -H 'Content-Type: application/octet-stream' -d $'�PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x00\x00\x00\x00:~�U\x00\x00\x00\nIDATx�c`\x00\x00\x00\x02\x00\x01H��q\x00\x00\x00\x00IEND�B`�' http://localhost:8000/v1/sandboxes/sbx-409f4ca3/files
+
+    st replay l5RE3u
+
+=================================== WARNINGS ===================================
+
+Method Not Allowed: 1 operation consistently returned `405 Method Not Allowed`, skipped from later phases
+
+  - PATCH /v1/sandboxes/{sandbox_id}
+
+💡 Verify the server actually accepts these methods, or remove them from the schema if unsupported
+
+=================================== SUMMARY ====================================
+
+API Operations:
+  Selected: 9/9
+  Tested: 9
+
+Test Phases:
+  ❌ Examples
+  ❌ Coverage
+  ❌ Fuzzing
+  ❌ Stateful
+
+Failures:
+  ❌ ST205 Allow header mismatch: 1
+  ❌ ST201 Schema-violating request accepted: 2
+  ❌ ST103 Undocumented status code: 3
+
+For more information, run `st explain <code>` for ST103, ST201, ST205.
+
+Warnings:
+  ⚠️ Method Not Allowed: 1 operation skipped after consistent 405 responses
+
+Test cases:
+  487 generated, 6 found 6 unique failures
+
+Seed: 113516626032474173991020287796418750900
+
+======================= 6 failures, 1 warning in 37.97s ========================
+make: *** [Makefile:37: test-contract] Error 1

@@ -1,0 +1,807 @@
+# Contrat de sandboxd — TP2.
+# Le contrat fait foi : c'est lui qui sert de documentation, de mock (make mock)
+# et de test (make test-contract). Vérifier avec `make lint` après chaque modification.
+#
+# Lecture rapide des choix (à savoir expliquer à l'oral) :
+#   - Création asynchrone : POST répond 202 (« accepté, je m'en occupe »), la sandbox
+#     est en état pending, et l'en-tête Location donne l'adresse où suivre son état.
+#   - Toutes les erreurs sont en application/problem+json (RFC 9457), via des réponses
+#     réutilisables dans components/responses.
+#   - 400 = requête mal formée (JSON cassé, jeton de page inconnu, chemin dangereux)
+#     415 = mauvais Content-Type
+#     422 = JSON correct mais contenu invalide (image hors liste blanche, borne dépassée)
+#     404 = sandbox (ou fichier) introuvable
+#     409 = conflit avec l'état actuel (sandbox pas encore prête, clé d'idempotence réutilisée)
+openapi: 3.1.0
+info:
+  title: sandboxd
+  version: 1.0.0
+  summary: Des sandboxes éphémères à la demande, pilotées par HTTP.
+  description: |
+    sandboxd crée, pilote et détruit des sandboxes : des conteneurs Docker
+    isolés et jetables, dans lesquels un opérateur ou un agent exécute des
+    commandes et lit ou écrit des fichiers.
+    Toutes les erreurs suivent la RFC 9457 (application/problem+json).
+  contact:
+    name: "Anas Louraibi"
+servers:
+  - url: http://localhost:8000
+    description: Développement local
+# Bloc D : toutes les opérations demandent Authorization: Bearer <jeton>,
+# sauf les sondes (healthz, readyz, metrics) qui déclarent security: [].
+security:
+  - bearerAuth: []
+tags:
+  - name: sandboxes
+    description: Cycle de vie des sandboxes
+  - name: exec
+    description: Exécution de commandes
+  - name: files
+    description: Lecture et écriture de fichiers
+  - name: auth
+    description: Jetons d'agent
+  - name: health
+    description: Sondes de santé et métriques
+
+paths:
+  # ------------------------------------------------------------------
+  # La collection : /v1/sandboxes (toutes les sandboxes)
+  # ------------------------------------------------------------------
+  /v1/sandboxes:
+    post:
+      tags: [sandboxes]
+      operationId: createSandbox
+      summary: Créer une sandbox
+      description: |
+        Crée une sandbox à partir d'une image de la liste blanche.
+        La création est asynchrone : la réponse 202 renvoie la sandbox en état
+        `pending`, et l'en-tête `Location` donne son adresse. Interroger cette
+        adresse jusqu'à l'état `ready` (ou `failed`).
+
+        Avec un en-tête `Idempotency-Key`, rejouer la même requête (même clé,
+        même corps) renvoie la même sandbox au lieu d'en créer une nouvelle.
+        Même clé avec un corps différent : 409.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxCreate"
+            examples:
+              minimal:
+                summary: Seulement l'image (valeurs par défaut pour le reste)
+                value:
+                  image: python:3.12-slim
+              complet:
+                summary: Tous les champs
+                value:
+                  image: alpine:3.20
+                  ttl_seconds: 900
+                  limits:
+                    cpus: 0.5
+                    memory_mb: 256
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "202":
+          description: Création acceptée. La sandbox est en cours de préparation.
+          headers:
+            Location:
+              description: Adresse de la sandbox créée, à interroger pour suivre son état.
+              required: true
+              schema:
+                type: string
+                example: /v1/sandboxes/sbx-a1b2c3d4
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+              example:
+                id: sbx-a1b2c3d4
+                image: python:3.12-slim
+                status: pending
+                ttl_seconds: 600
+                limits: {cpus: 1, memory_mb: 512}
+                created_at: "2026-11-23T14:00:00Z"
+                expires_at: "2026-11-23T14:10:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+    get:
+      tags: [sandboxes]
+      operationId: listSandboxes
+      summary: Lister les sandboxes
+      description: |
+        Liste paginée par curseur. Pour la page suivante, renvoyer
+        `next_page_token` dans `page_token`. Quand `next_page_token` vaut
+        `null`, c'est la dernière page.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Ne garder que les sandboxes dans cet état.
+          schema:
+            $ref: "#/components/schemas/SandboxStatus"
+        - name: page_size
+          in: query
+          required: false
+          description: Nombre maximum de sandboxes par page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: page_token
+          in: query
+          required: false
+          description: Curseur reçu dans `next_page_token` de la page précédente.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "200":
+          description: Une page de sandboxes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxList"
+              example:
+                items:
+                  - id: sbx-a1b2c3d4
+                    image: python:3.12-slim
+                    status: ready
+                    ttl_seconds: 600
+                    limits: {cpus: 1, memory_mb: 512}
+                    created_at: "2026-11-23T14:00:00Z"
+                    expires_at: "2026-11-23T14:10:00Z"
+                next_page_token: c2J4LWExYjJjM2Q0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  # ------------------------------------------------------------------
+  # Une sandbox précise : /v1/sandboxes/{sandbox_id}
+  # ------------------------------------------------------------------
+  /v1/sandboxes/{sandbox_id}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+    get:
+      tags: [sandboxes]
+      operationId: getSandbox
+      summary: Consulter une sandbox
+      description: Renvoie l'état courant de la sandbox.
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: La sandbox.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [sandboxes]
+      operationId: updateSandbox
+      summary: Prolonger une sandbox
+      description: |
+        Modifie la durée de vie (`ttl_seconds`), comptée depuis la création.
+        Corps en JSON Merge Patch (RFC 7396) : seuls les champs présents sont modifiés.
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/SandboxPatch"
+            example:
+              ttl_seconds: 1800
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "200":
+          description: La sandbox modifiée.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+    delete:
+      tags: [sandboxes]
+      operationId: deleteSandbox
+      summary: Détruire une sandbox
+      description: |
+        Supprime le conteneur puis la sandbox. Un second DELETE sur la même
+        sandbox renvoie 404 : elle n'existe plus.
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "204":
+          description: Sandbox détruite (pas de corps).
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ------------------------------------------------------------------
+  # Exécuter une commande dans la sandbox
+  # ------------------------------------------------------------------
+  /v1/sandboxes/{sandbox_id}/exec:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+    post:
+      tags: [exec]
+      operationId: execCommand
+      summary: Exécuter une commande
+      description: |
+        Exécute une commande dans `/workspace` et attend sa fin.
+        La commande est une liste d'arguments, jamais une chaîne passée à un shell.
+        Si elle dépasse `timeout_seconds`, elle est tuée : `timed_out` vaut `true`
+        et `exit_code` vaut `null`.
+        Une commande qui échoue n'est pas une erreur HTTP : la réponse est 200,
+        avec un `exit_code` différent de 0.
+        La sandbox doit être `ready`, sinon 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+            example:
+              cmd: ["python", "-c", "print(1)"]
+              timeout_seconds: 10
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: La commande s'est terminée (ou a été tuée par le timeout).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+              examples:
+                succes:
+                  summary: Commande réussie
+                  value:
+                    exit_code: 0
+                    stdout: "1\n"
+                    stderr: ""
+                    duration_ms: 42
+                    timed_out: false
+                    truncated: false
+                timeout:
+                  summary: Commande arrêtée par le timeout
+                  value:
+                    exit_code: null
+                    stdout: ""
+                    stderr: ""
+                    duration_ms: 10012
+                    timed_out: true
+                    truncated: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/NotReady"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  # ------------------------------------------------------------------
+  # Lire et écrire des fichiers dans /workspace
+  # ------------------------------------------------------------------
+  /v1/sandboxes/{sandbox_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      tags: [files]
+      operationId: readFile
+      summary: Lire un fichier
+      description: |
+        Renvoie le contenu brut d'un fichier de `/workspace`.
+        - chemin absent : 404 ;
+        - chemin qui désigne un dossier : 404 (seuls les fichiers se lisent) ;
+        - chemin qui sort de `/workspace` (`../`, chemin absolu) : 400 ;
+        - sandbox pas encore prête : 409.
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: Le contenu du fichier, octet pour octet.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadPath"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/NotReady"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+    put:
+      tags: [files]
+      operationId: writeFile
+      summary: Écrire un fichier
+      description: |
+        Écrit (ou remplace) un fichier dans `/workspace` avec le corps de la requête.
+        201 si le fichier a été créé, 204 s'il existait déjà et a été remplacé.
+        Mêmes refus que pour la lecture sur le chemin. Taille maximale : 10 Mo.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "201":
+          description: Fichier créé.
+        "204":
+          description: Fichier existant remplacé.
+        "400":
+          $ref: "#/components/responses/BadPath"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/NotReady"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  # ------------------------------------------------------------------
+  # Bloc D : jeton d'agent
+  # ------------------------------------------------------------------
+  /v1/sandboxes/{sandbox_id}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/SandboxId"
+    post:
+      tags: [auth]
+      operationId: createAgentToken
+      summary: Émettre un jeton d'agent
+      description: |
+        Réservé à l'opérateur. Renvoie un JWT (HS256) valable 15 minutes, qui ne
+        donne accès qu'à cette sandbox : consulter, exécuter, lire et écrire des
+        fichiers. Sur la sandbox d'un autre, ce jeton reçoit 404 ; sur une
+        action d'opérateur (créer, lister, détruire), il reçoit 403.
+      responses:
+        "201":
+          description: Le jeton d'agent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ------------------------------------------------------------------
+  # Santé
+  # ------------------------------------------------------------------
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Le service est-il prêt ?
+      description: Prêt seulement si le démon Docker répond.
+      security: []
+      responses:
+        "200":
+          description: Prêt.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [ready]}
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /metrics:
+    get:
+      tags: [health]
+      operationId: getMetrics
+      summary: Métriques Prometheus
+      description: Métriques RED (requêtes, erreurs, durées) et sandboxes_active, au format texte Prometheus.
+      security: []
+      responses:
+        "200":
+          description: Les métriques.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Le processus est-il vivant ?
+      description: Ne vérifie aucune dépendance.
+      security: []
+      responses:
+        "200":
+          description: Vivant.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [ok]}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Deux sortes de jetons dans Authorization: Bearer <jeton> :
+        la clé de l'opérateur (variable d'environnement SANDBOXD_API_KEY),
+        ou un jeton d'agent (JWT de 15 min) émis par createAgentToken.
+  parameters:
+    SandboxId:
+      name: sandbox_id
+      in: path
+      required: true
+      description: Identifiant de la sandbox.
+      schema:
+        type: string
+        pattern: "^sbx-[a-z0-9]{8}$"
+      example: sbx-a1b2c3d4
+    FilePath:
+      name: path
+      in: query
+      required: true
+      description: |
+        Chemin du fichier, relatif à `/workspace` (par exemple `src/main.py`).
+        Refusé (400) s'il est absolu ou s'il contient `..`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      example: src/main.py
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Clé choisie par le client (un UUID par exemple), réutilisée à chaque
+        nouvel essai de la même création.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      example: 7f3c2a9e-1b4d-4c8a-9e2f-5d6b7a8c9d0e
+
+  schemas:
+    AgentToken:
+      type: object
+      required: [token, token_type, sandbox_id, expires_at]
+      properties:
+        token:
+          type: string
+          description: "Le JWT à envoyer dans l’en-tête Authorization (Bearer)."
+        token_type:
+          type: string
+          enum: [Bearer]
+        sandbox_id:
+          type: string
+          example: sbx-a1b2c3d4
+        expires_at:
+          type: string
+          format: date-time
+    SandboxStatus:
+      type: string
+      description: |
+        pending = en préparation ; ready = utilisable ; failed = la création a échoué ;
+        terminated = détruite ou expirée.
+      enum: [pending, ready, failed, terminated]
+    Image:
+      type: string
+      description: Images autorisées (liste blanche).
+      enum: [python:3.12-slim, node:22-slim, alpine:3.20]
+    TtlSeconds:
+      type: integer
+      description: Durée de vie en secondes, comptée depuis la création.
+      minimum: 60
+      maximum: 3600
+    Limits:
+      type: object
+      additionalProperties: false
+      properties:
+        cpus:
+          type: number
+          minimum: 0.1
+          maximum: 2
+          default: 1
+        memory_mb:
+          type: integer
+          minimum: 64
+          maximum: 1024
+          default: 512
+    Sandbox:
+      type: object
+      required: [id, image, status, ttl_seconds, limits, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          pattern: "^sbx-[a-z0-9]{8}$"
+        image:
+          $ref: "#/components/schemas/Image"
+        status:
+          $ref: "#/components/schemas/SandboxStatus"
+        ttl_seconds:
+          type: integer
+        limits:
+          $ref: "#/components/schemas/Limits"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    # --- Corps de requête et de réponse ajoutés au TP2 ---
+    SandboxCreate:
+      type: object
+      description: Ce que l'opérateur envoie pour créer une sandbox.
+      required: [image]
+      additionalProperties: false
+      properties:
+        image:
+          $ref: "#/components/schemas/Image"
+        ttl_seconds:
+          allOf:
+            - $ref: "#/components/schemas/TtlSeconds"
+          default: 600
+        limits:
+          $ref: "#/components/schemas/Limits"
+    SandboxPatch:
+      type: object
+      description: Les champs modifiables. Seul ttl_seconds l'est pour l'instant.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        ttl_seconds:
+          $ref: "#/components/schemas/TtlSeconds"
+    SandboxList:
+      type: object
+      required: [items, next_page_token]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Sandbox"
+        next_page_token:
+          type: [string, "null"]
+          description: Curseur de la page suivante, ou null s'il n'y en a plus.
+    ExecRequest:
+      type: object
+      required: [cmd]
+      additionalProperties: false
+      properties:
+        cmd:
+          type: array
+          description: La commande et ses arguments, sans shell.
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+          example: ["python", "-c", "print(1)"]
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+          default: 30
+    ExecResult:
+      type: object
+      required: [exit_code, stdout, stderr, duration_ms, timed_out, truncated]
+      properties:
+        exit_code:
+          type: [integer, "null"]
+          description: Code de sortie de la commande, ou null si elle a été tuée par le timeout.
+        stdout:
+          type: string
+          description: Sortie standard (1 Mo au plus).
+        stderr:
+          type: string
+          description: Sortie d'erreur (1 Mo au plus).
+        duration_ms:
+          type: integer
+          minimum: 0
+        timed_out:
+          type: boolean
+          description: Vrai si la commande a dépassé timeout_seconds.
+        truncated:
+          type: boolean
+          description: Vrai si stdout ou stderr a été coupé à 1 Mo.
+
+    Problem:
+      type: object
+      description: RFC 9457, Problem Details for HTTP APIs.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+
+  # Réponses d'erreur réutilisables : une par code (toutes en problem+json).
+  responses:
+    Unauthorized:
+      description: Jeton absent, invalide ou expiré.
+      headers:
+        WWW-Authenticate:
+          description: Le schéma attendu (Bearer).
+          schema: {type: string}
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: jeton invalide ou expiré
+    Forbidden:
+      description: Jeton valide, mais action réservée à l'opérateur.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/forbidden
+            title: Forbidden
+            status: 403
+            detail: action réservée à l'opérateur
+    TooManyRequests:
+      description: Quota atteint (trop de sandboxes actives). Réessayer après Retry-After.
+      headers:
+        Retry-After:
+          description: Secondes à attendre.
+          schema: {type: integer}
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/quota-exceeded
+            title: Too Many Requests
+            status: 429
+            detail: 20 sandboxes actives au plus
+    ServiceUnavailable:
+      description: Le démon Docker ne répond pas.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/docker-unavailable
+            title: Service Unavailable
+            status: 503
+            detail: le démon Docker ne répond pas
+    BadRequest:
+      description: Requête mal formée (JSON invalide, jeton de page inconnu…).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/invalid-json
+            title: Bad Request
+            status: 400
+            detail: le corps n'est pas du JSON valide
+    BadPath:
+      description: Chemin refusé (absolu, ou qui sort de /workspace avec ..).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/bad-path
+            title: Bad Request
+            status: 400
+            detail: "../etc/passwd sort de /workspace"
+    NotFound:
+      description: Sandbox (ou fichier) introuvable.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/not-found
+            title: Not Found
+            status: 404
+            detail: sbx-a1b2c3d4 n'existe pas
+    Conflict:
+      description: Conflit avec l'état actuel (clé d'idempotence réutilisée avec un autre corps, sandbox terminée…).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/idempotency-key-reused
+            title: Conflict
+            status: 409
+            detail: cette Idempotency-Key a déjà servi pour un autre corps
+    NotReady:
+      description: La sandbox n'est pas encore prête (pending) ou n'est plus utilisable.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/not-ready
+            title: Conflict
+            status: 409
+            detail: sbx-a1b2c3d4 est en état pending
+    PayloadTooLarge:
+      description: Corps trop volumineux (10 Mo au plus).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/payload-too-large
+            title: Payload Too Large
+            status: 413
+            detail: 10 Mo au plus
+    UnsupportedMediaType:
+      description: Content-Type non accepté pour cette opération.
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/unsupported-media-type
+            title: Unsupported Media Type
+            status: 415
+            detail: "attendu : application/json"
+    UnprocessableContent:
+      description: JSON valide mais contenu refusé (image hors liste blanche, borne dépassée…).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+          example:
+            type: /errors/validation
+            title: Unprocessable Content
+            status: 422
+            detail: "image : la valeur doit être python:3.12-slim, node:22-slim ou alpine:3.20"

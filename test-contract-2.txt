@@ -1,0 +1,54 @@
+.venv/bin/schemathesis run openapi.yaml --url http://localhost:8000 -n 20 -w 1 \
+	--exclude-checks positive_data_acceptance
+Schemathesis v4.34.2
+━━━━━━━━━━━━━━━━━━━━
+
+ ✅  Loaded specification from openapi.yaml (in 4.37s)
+
+     Base URL:         http://localhost:8000
+     Specification:    Open API 3.1.0
+     Operations:       9 selected / 9 total
+
+ ✅  API capabilities:
+
+     Supports NULL byte in headers:                            ✘
+     Accepts backslash and control characters in URL paths:    ✓
+     Cache:                                                    1 stale removed
+
+ ✅  Examples (in 1.35s)
+
+     ✅ 7 passed  ⏭  2 skipped
+
+ ✅  Coverage (in 6.51s)
+
+     ✅ 9 passed
+
+ ✅  Fuzzing (in 12.39s)
+
+     ✅ 9 passed
+
+ ✅  Stateful (in 6.24s)
+
+     Scenarios:    21
+     API Links:    18 covered / 22 selected / 22 total (22 inferred)
+
+     ✅ 21 passed
+
+=================================== SUMMARY ====================================
+
+API Operations:
+  Selected: 9/9
+  Tested: 9
+
+Test Phases:
+  ✅ Examples
+  ✅ Coverage
+  ✅ Fuzzing
+  ✅ Stateful
+
+Test cases:
+  548 generated, 548 passed
+
+Seed: 175221875657671359944203554177165180271
+
+========================== No issues found in 27.38s ===========================
