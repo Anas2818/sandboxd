@@ -41,6 +41,10 @@ def etape(titre):
 def montre(code, reponse, champs=None):
     if isinstance(reponse, dict) and champs:
         reponse = {k: reponse.get(k) for k in champs}
+        for k in ("stderr", "stdout"):                     # on ne garde que la dernière ligne utile
+            v = reponse.get(k)
+            if isinstance(v, str) and v.strip():
+                reponse[k] = v.strip().splitlines()[-1]
     print(f"-> {code}  {json.dumps(reponse, ensure_ascii=False) if not isinstance(reponse, str) else reponse}")
 
 
